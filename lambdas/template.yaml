@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+   SAM Template for Resilient Cloudformation custom resource deployment
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+Parameters:
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - m1.small
+      - m1.large
+      - m1.medium
+      - m1.xlarge
+    ConstraintDescription: Must be a valid EC2 instance type.
+
+Mappings:
+  AWSInstanceType2Arch:
+    t2.micro:
+      "Arch" : "HVM64"
+    t2.small:
+      "Arch" : "HVM64"
+    t2.medium:
+      "Arch" : "HVM64"
+    m1.small:
+      "Arch" : "PV64"
+    m1.medium:
+      "Arch" : "PV64"
+    m1.large:
+      "Arch": "PV64"
+    m1.xlarge:
+      "Arch" : "PV64"
+
+Resources:
+  AMIInfoFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: amilookup/
+      Handler: app.lambda_handler
+      Runtime: python3.8
+      Timeout: 300
+      EventInvokeConfig:
+          MaximumEventAgeInSeconds: 60
+          MaximumRetryAttempts: 2
+          DestinationConfig:
+            OnFailure:
+              Type: SQS
+              Destination: !GetAtt RetryQueue.Arn
+      Policies:
+        - AMIDescribePolicy: {}
+  AMIInfo:
+    Type: Custom::AMIInfo
+    DependsOn: RetryFunction
+    Properties:
+      ServiceToken: !GetAtt AMIInfoFunction.Arn
+      Region: !Ref "AWS::Region"
+      Architecture:
+        Fn::FindInMap:
+          - AWSInstanceType2Arch
+          - !Ref InstanceType
+          - Arch
+
+  TestInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !GetAtt AMIInfo.Id
+
+  RetryFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: retry/
+      Handler: app.lambda_handler
+      Runtime: python3.8
+      Timeout: 60
+      Events:
+        MySQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt RetryQueue.Arn
+            BatchSize: 1
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AMIInfoFunction
+
+  RetryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      DelaySeconds: 60
+      MessageRetentionPeriod: 600
+
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  AMIInfoFunction:
+    Description: "Ami lookup Lambda Function ARN"
+    Value: !GetAtt AMIInfoFunction.Arn
+  AMIInfoFunctionIamRole:
+    Description: "Implicit IAM Role created for Ami lookup function"
+    Value: !GetAtt AMIInfoFunctionRole.Arn
